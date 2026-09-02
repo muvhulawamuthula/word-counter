@@ -1,104 +1,116 @@
 # Parallel File Word Counter
 
-A command-line tool that counts word frequencies across a large collection of files using four different parallelism strategies — then benchmarks them head to head.
+Java 21 CLI that counts word frequencies across many `.txt` files using four concurrency strategies, then compares them on the same input.
 
-Built to deeply understand Java concurrency primitives: Fork/Join, CompletableFuture, parallel streams, and why the right strategy depends on whether your bottleneck is CPU or I/O.
-
----
-
-## What it does
-
-- Scans a directory of `.txt` files
-- Counts every word and its frequency across all files
-- Runs four strategies on the same input and compares throughput
-- Runs a threshold sensitivity analysis on Fork/Join to find the optimal split size
-- Verifies all strategies produce identical results
+Built to explore when **Fork/Join**, **CompletableFuture + virtual threads**, and **parallel streams** win — and why the bottleneck (CPU vs I/O) matters more than the API you pick.
 
 ---
 
-## Strategies compared
+## Features
 
-| Strategy | Approach | Best for |
+- Directory scan of `.txt` files (`FileScanner`)
+- Per-file tokenize → global frequency map
+- Four strategies on identical input, with throughput and speedup vs sequential
+- Warm-up pass before measured runs (`Main`) / JIT warm-up + averaged runs (`BenchmarkRunner`)
+- Fork/Join **threshold sensitivity** sweep (`1, 5, 10, 25, 50, 100`)
+- Cross-strategy **total-word consistency** check
+- Reproducible synthetic corpus (`TestFileGenerator`, `Random(42)`)
+
+---
+
+## Strategies
+
+| Strategy | Implementation | Best when |
 |---|---|---|
-| Sequential | Single thread, one file at a time | Baseline measurement |
-| Fork/Join | Recursive split with work stealing | CPU-bound, uneven workloads |
-| CompletableFuture | One async task per file, virtual threads | I/O-bound, many small files |
-| Parallel Streams | `parallelStream()` + `toConcurrentMap` | Simple pipelines, minimal code |
+| **Sequential** | Single-threaded loop | Baseline |
+| **Fork/Join** | `RecursiveTask` on `ForkJoinPool.commonPool()`, default threshold `10` | CPU-bound / uneven file sizes (work stealing) |
+| **CompletableFuture** | One `supplyAsync` per file on `newVirtualThreadPerTaskExecutor()` | I/O-bound / many files (cheap parking on disk waits) |
+| **Parallel Streams** | `parallelStream()` + `Collectors.toConcurrentMap(..., Long::sum)` | Simple pipelines, minimal code |
 
 ---
 
-## Project structure
+## Requirements
 
-```
-src/main/java/com/wordcount/
-├── Main.java                          # Entry point — runs all four strategies
-├── counter/
-│   ├── SequentialCounter.java         # Single-threaded baseline
-│   ├── ForkJoinCounter.java           # RecursiveTask with configurable threshold
-│   ├── CompletableFutureCounter.java  # Async per-file with virtual thread executor
-│   └── ParallelStreamCounter.java     # parallelStream + toConcurrentMap
-├── model/
-│   └── WordCountResult.java           # Holds counts, timing, throughput stats
-├── util/
-│   ├── FileScanner.java               # Walks directory, returns list of paths
-│   ├── WordTokenizer.java             # Splits text into normalised word counts
-│   ├── ResultMerger.java              # Merges Map<String,Long> by summing counts
-│   └── TestFileGenerator.java         # Generates reproducible test files
-└── benchmark/
-    └── BenchmarkRunner.java           # Averaged runs + threshold sensitivity analysis
-```
+- **Java 21+** (virtual threads, language level in `pom.xml`)
+- **Maven 3.8+**
 
 ---
 
-## Prerequisites
-
-- Java 21+
-- Maven 3.8+
-
----
-
-## Getting started
+## Quick start
 
 ```bash
-git clone https://github.com/yourusername/word-counter.git
+git clone https://github.com/muvhulawamuthula/word-counter.git
 cd word-counter
-mvn package -q
+mvn -q package
 ```
 
-Test files are generated automatically on first run.
+Fat JAR (shade plugin) entry point: `com.wordcount.Main`.
+
+```bash
+java -jar target/word-counter-1.0-SNAPSHOT.jar
+# or
+mvn -q compile exec:java -Dexec.mainClass="com.wordcount.Main"
+```
+
+On first run, if `test-files/` is missing or empty, **Main** generates:
+
+```text
+500 files × 50_000 words  →  25,000,000 tokens before filtering
+```
 
 ---
 
 ## Running
 
-### All four strategies — single comparison run
+### Single comparison (`Main`)
 
 ```bash
-mvn compile exec:java -Dexec.mainClass="com.wordcount.Main"
+mvn -q compile exec:java -Dexec.mainClass="com.wordcount.Main"
 ```
 
-```
-Files  : 200
-Size   : 1.91 MB
-Cores  : 4
+What it does:
+
+1. Ensures `test-files/` exists (generates **500 × 50k** if needed)
+2. Warm-up: one run of each strategy (discarded)
+3. Timed run of Sequential → Fork/Join → CompletableFuture → Parallel Streams
+4. Prints time, MB/s, speedup vs sequential
+5. Verifies all strategies report the same `totalWords`
+6. Prints top 10 words from the Fork/Join result
+
+Illustrative output shape (timings depend on machine; numbers below are from a smaller corpus — see [docs/benchmarks.md](docs/benchmarks.md)):
+
+```text
+Files  : 500
+Size   : ~XX MB
+Cores  : N
+
+Warming up JVM...
+Done.
 
 Strategy               Time       Throughput   Speedup
 ─────────────────────────────────────────────────────────
-Sequential              186ms     10.2 MB/s    1.00×
-Fork/Join                54ms     35.4 MB/s    3.44×
-CompletableFuture        61ms     31.3 MB/s    3.05×
-Parallel Streams         58ms     32.9 MB/s    3.21×
+Sequential              …ms       … MB/s       1.00×
+Fork/Join               …ms       … MB/s       …
+CompletableFuture       …ms       … MB/s       …
+Parallel Streams        …ms       … MB/s       …
 
-✓ All strategies agree: 2,000,000 total words
+✓ All strategies agree: … total words
+
+Top 10 words:
+  …
 ```
 
-### Full benchmark — averaged runs + threshold sensitivity
+### Averaged benchmark + threshold sweep (`BenchmarkRunner`)
 
 ```bash
-mvn compile exec:java -Dexec.mainClass="com.wordcount.benchmark.BenchmarkRunner"
+mvn -q compile exec:java -Dexec.mainClass="com.wordcount.benchmark.BenchmarkRunner"
 ```
 
-```
+Defaults when generating data: **200 files × 10_000 words**, **5** timed runs after **3** warm-up iterations of each strategy, then Fork/Join thresholds `{1, 5, 10, 25, 50, 100}`.
+
+Example numbers from a 4-core run on that smaller corpus (treat as illustrative; re-run locally):
+
+```text
 === Final Results (averaged over 5 runs) ===
 
 Strategy               Avg Time    Speedup
@@ -120,23 +132,52 @@ Threshold   Avg Time    Speedup vs Sequential
 100          119ms      1.56×
 ```
 
-### Scale up the input
+On that run, **threshold 10** (the `ForkJoinCounter` default) was the sweet spot.
 
-To generate a larger dataset, edit `Main.java`:
+### Scale the corpus
 
-```java
-TestFileGenerator.generate(testDir, 500, 50_000); // 500 files × 50k words = 25M words
-```
+Edit the generator call (or delete `test-files/` after changing it):
 
-Then delete `test-files/` and re-run. Larger input reveals I/O vs CPU bottlenecks more clearly.
+| Entry point | Default generation |
+|---|---|
+| `Main` | `TestFileGenerator.generate(testDir, 500, 50_000)` |
+| `BenchmarkRunner` | `TestFileGenerator.generate(testDir, 200, 10_000)` |
+
+Larger inputs make CPU vs I/O trade-offs clearer. Word list is fixed (40 CS-ish tokens); seed `42` keeps runs reproducible.
 
 ---
 
-## How each strategy works
+## Project layout
 
-### Sequential (baseline)
+```text
+src/main/java/com/wordcount/
+├── Main.java                            # Comparison entry + warm-up + top words
+├── counter/
+│   ├── SequentialCounter.java           # Baseline
+│   ├── ForkJoinCounter.java             # RecursiveTask; threshold (default 10)
+│   ├── CompletableFutureCounter.java    # VT executor; merge after allOf
+│   └── ParallelStreamCounter.java       # parallelStream + toConcurrentMap
+├── model/
+│   └── WordCountResult.java             # counts, elapsedMs, MB/s, words/s
+├── util/
+│   ├── FileScanner.java                 # walk → *.txt; totalBytes
+│   ├── WordTokenizer.java               # lower-case; [^a-z']+; length > 1
+│   ├── ResultMerger.java                # Map.merge(..., Long::sum)
+│   └── TestFileGenerator.java           # seeded synthetic .txt files
+└── benchmark/
+    └── BenchmarkRunner.java             # averaged runs + threshold sweep
+```
 
-Processes files one at a time in a simple loop. No parallelism. Read file → tokenize → merge into combined map → repeat.
+Further reading:
+
+- [Architecture](docs/architecture.md) — data flow, pooling, merge semantics
+- [Benchmarks](docs/benchmarks.md) — how to measure, interpret thresholds, caveats
+
+---
+
+## How each strategy works (code-accurate)
+
+### Sequential
 
 ```java
 for (Path file : files) {
@@ -145,158 +186,84 @@ for (Path file : files) {
 }
 ```
 
-Fast enough for small inputs. The number to beat.
-
----
-
 ### Fork/Join
 
-Uses `ForkJoinPool` with `RecursiveTask` to recursively split the file list until each subtask is small enough to count directly. Results bubble back up the tree, merging at each level.
-
-```
-Task(0-199)
-├── Task(0-99)
-│   ├── Task(0-49)  → count → Map
-│   └── Task(50-99) → count → Map → merge
-└── Task(100-199)
-    ├── Task(100-149) → count → Map
-    └── Task(150-199) → count → Map → merge
-                                       ↓
-                                  final merge
-```
-
-The key implementation detail — always fork one half and compute the other in the current thread:
+Splits the file list until `files.size() <= threshold`, then counts in the leaf. Prefer **fork left / compute right** so the current worker stays busy:
 
 ```java
-leftTask.fork();                       // runs on another thread
-Map<String, Long> right = rightTask.compute(); // current thread stays busy
-Map<String, Long> left  = leftTask.join();     // wait for forked task
-return ResultMerger.merge(left, right);
+left.fork();
+Map<String, Long> rightResult = right.compute();
+Map<String, Long> leftResult  = left.join();
+return ResultMerger.merge(leftResult, rightResult);
 ```
 
-Forking both halves wastes the current thread while it waits. Computing one half directly keeps every thread productive.
+Uses `ForkJoinPool.commonPool()` via `pool.invoke(...)`.
 
-**Work stealing:** idle threads steal tasks from the back of busy threads' deques. This self-balances when files are uneven in size — no manual load balancing needed.
-
-**Threshold:** the split stops when a task has ≤ threshold files and counts them directly. Too small → task creation overhead dominates. Too large → cores sit idle. The benchmark finds the sweet spot empirically.
-
----
-
-### CompletableFuture
-
-Submits one async task per file to a virtual thread executor. All tasks run concurrently — no recursive splitting, no work stealing. Results are merged sequentially after all futures complete.
+### CompletableFuture + virtual threads
 
 ```java
 ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-
 List<CompletableFuture<Map<String, Long>>> futures = files.stream()
         .map(file -> CompletableFuture.supplyAsync(() -> countFile(file), executor))
         .toList();
-
 CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-
-// merge all results
-futures.forEach(f -> ResultMerger.merge(combined, f.join()));
+// sequential merge of completed maps
 ```
 
-Virtual threads park cheaply during `Files.readString()` I/O — no OS thread sits idle while waiting for disk. This makes CompletableFuture + virtual threads particularly effective when I/O latency dominates.
+Virtual threads park during `Files.readString`; merge happens on the calling thread after `allOf`.
 
----
-
-### Parallel Streams
-
-The most concise implementation. `parallelStream()` partitions the file list across the common `ForkJoinPool` automatically. `toConcurrentMap` handles thread-safe merging via `Long::sum`.
+### Parallel streams
 
 ```java
-Map<String, Long> combined = files.parallelStream()
-        .map(this::countFile)
-        .flatMap(m -> m.entrySet().stream())
-        .collect(Collectors.toConcurrentMap(
-                Map.Entry::getKey,
-                Map.Entry::getValue,
-                Long::sum
-        ));
+files.parallelStream()
+     .map(this::countFile)
+     .flatMap(m -> m.entrySet().stream())
+     .collect(Collectors.toConcurrentMap(
+             Map.Entry::getKey, Map.Entry::getValue, Long::sum));
 ```
 
-**Tradeoffs vs Fork/Join:**
-- No control over thread pool or parallelism level
-- Error handling inside streams is awkward
-- Cannot tune the split strategy
-- Sufficient for most simple pipelines — overkill to reach for Fork/Join unless you need the control
+Shares the common Fork/Join pool; less tunable than the explicit `ForkJoinCounter`.
 
 ---
 
-## Key concepts
+## Tokenization rules
 
-### Fork/Join vs thread pool
+`WordTokenizer`:
 
-A fixed thread pool assigns each task to a thread and that thread works on it until done. If some tasks are slow (large files), other threads finish early and sit idle.
+1. Lower-case the whole file
+2. Split on `[^a-z']+` (letters and apostrophes kept)
+3. Drop blanks and tokens with `length <= 1`
 
-`ForkJoinPool` uses work stealing — idle threads steal pending tasks from the back of busy threads' queues. Uneven workloads self-balance. This is why Fork/Join consistently outperforms a fixed pool for recursive divide-and-conquer problems.
-
-### Amdahl's Law in practice
-
-Not all of a program can be parallelised. The final merge at the top of the Fork/Join tree is sequential. If 20% of total time is sequential, no amount of parallelism can produce more than a 5× speedup — regardless of core count.
-
-This is why the threshold sensitivity table matters: splitting too finely doesn't improve past a point because the sequential merge overhead becomes the bottleneck.
-
-### I/O vs CPU bottleneck
-
-Word counting has two phases:
-- **Read** — `Files.readString()` — I/O bound
-- **Tokenize + merge** — CPU bound
-
-On an SSD with fast sequential reads, reading is fast and CPU dominates — Fork/Join's CPU efficiency shines. On a slow disk or network filesystem, I/O dominates — CompletableFuture with virtual threads wins because virtual threads park cheaply during waits.
-
-Always profile and measure. Never assume which bottleneck you have.
-
-### Result correctness
-
-Parallel code is only useful if it produces the same result as sequential code. The consistency check at the end of each run verifies all four strategies count exactly the same number of words:
-
-```
-✓ All strategies agree: 2,000,000 total words
-```
-
-Any merge bug — race condition, lost update, wrong accumulator — shows up here immediately.
+So `"CPU"` → `cpu`; single-letter tokens are ignored. That affects absolute totals vs raw generator word counts.
 
 ---
 
-## Why this matters
+## Correctness
 
-Most developers reach for `parallelStream()` and call it done. This project builds the understanding to answer questions that most senior candidates cannot:
-
-- Why does Fork/Join outperform a fixed thread pool on uneven workloads?
-- What is work stealing and why does it matter?
-- When does CompletableFuture beat Fork/Join?
-- Why does a threshold of 1 (maximum splits) perform worse than a threshold of 10?
-- What does Amdahl's Law predict about the maximum speedup on your hardware?
-
-The benchmark output is evidence you can walk through in an interview — not just a claim that you understand concurrency.
+Parallelism is worthless if maps disagree. After timed runs, `Main` compares `totalWords` across all four `WordCountResult`s. A race or bad merge surfaces as a mismatch printout.
 
 ---
 
-## Stretch goals
+## Design notes (interview-ready)
 
-- [ ] Add a stop-word filter (`the`, `and`, `of`) and observe its effect on top-word rankings
-- [ ] Process `.gz` compressed files via `GZIPInputStream` — measure decompression overhead
-- [ ] Replace `Files.readString()` with `FileChannel.map()` (memory-mapped I/O) and benchmark the difference
-- [ ] Process a single large file by splitting it into byte-range chunks — handle words split at chunk boundaries
-- [ ] Add a progress bar using `AtomicInteger` — thread-safe counter without locks
-- [ ] Add JFR recording and compare CPU utilisation profiles between strategies
-- [ ] Try `ForkJoinPool` with explicit parallelism levels (`new ForkJoinPool(n)`) vs common pool
+- **Work stealing** helps when file sizes differ; idle workers steal from busy deques.
+- **Threshold too small** → task overhead; **too large** → underused cores (see sensitivity table).
+- **Amdahl**: top-level merges and sequential post-processing bound speedup.
+- **I/O vs CPU**: SSD + heavy tokenize favors Fork/Join / streams; slow FS favors virtual-thread CF.
+- Measure on your hardware — do not treat sample tables as absolute rankings.
 
 ---
 
-## References
+## Stretch ideas
 
-- [Java SE 21 — ForkJoinPool](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ForkJoinPool.html)
-- [JEP 444 — Virtual Threads](https://openjdk.org/jeps/444)
-- [Java Concurrency in Practice — Goetz et al.](https://jcip.net)
-- [Amdahl's Law — Wikipedia](https://en.wikipedia.org/wiki/Amdahl%27s_law)
+- [ ] Stop-word filter and re-rank top words  
+- [ ] `.gz` via `GZIPInputStream` — measure inflate cost  
+- [ ] `FileChannel.map` / memory-mapped reads  
+- [ ] Custom `ForkJoinPool` size vs `commonPool()`  
+- [ ] JMH microbenchmarks instead of wall-clock averages  
 
 ---
 
 ## License
 
-MIT
+No license file in-repo yet — add one before treating this as reusable open source.
