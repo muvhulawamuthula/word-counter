@@ -299,4 +299,5 @@ The benchmark output is evidence you can walk through in an interview — not ju
 
 ## License
 
-MIT
+
+MIT. See [LICENSE](LICENSE).
